@@ -1,27 +1,34 @@
-const { neon } = require('@neondatabase/serverless');
+const { createClient } = require('@libsql/client');
 const { put } = require('@vercel/blob');
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+let client;
 let schemaReady;
 
 function database() {
-  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not configured');
-  return neon(process.env.DATABASE_URL);
+  if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
+    throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required');
+  }
+  if (!client) client = createClient({
+    url: process.env.TURSO_DATABASE_URL,
+    authToken: process.env.TURSO_AUTH_TOKEN
+  });
+  return client;
 }
 
-async function ensureSchema(sql) {
+async function ensureSchema(db) {
   if (!schemaReady) {
-    schemaReady = sql.transaction([
-      sql`CREATE TABLE IF NOT EXISTS dnr_drafts (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        document JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    schemaReady = db.batch([
+      `CREATE TABLE IF NOT EXISTS dnr_drafts (
+        id INTEGER PRIMARY KEY,
+        document TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`,
-      sql`CREATE TABLE IF NOT EXISTS dnr_history (
-        id BIGSERIAL PRIMARY KEY,
+      `CREATE TABLE IF NOT EXISTS dnr_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        document JSONB NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        document TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`
     ]).catch(error => {
       schemaReady = undefined;
@@ -77,18 +84,23 @@ async function readJson(req) {
   return value;
 }
 
+function parseDocument(value) {
+  if (!value) return null;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
 function screenshotCount(document) {
   return (document.sections || []).reduce((total, section) => total + (section.shots || []).filter(shot => shot.image).length, 0);
 }
 
 async function handler(req, res) {
-  const sql = database();
-  await ensureSchema(sql);
+  const db = database();
+  await ensureSchema(db);
   const parts = pathParts(req);
 
   if (req.method === 'GET' && parts.length === 1 && parts[0] === 'draft') {
-    const rows = await sql`SELECT document FROM dnr_drafts WHERE id = 1`;
-    return json(res, { draft: rows[0]?.document || null });
+    const result = await db.execute('SELECT document FROM dnr_drafts WHERE id = 1');
+    return json(res, { draft: parseDocument(result.rows[0]?.document) });
   }
 
   if (parts[0] === 'images' && parts[1]) {
@@ -109,25 +121,33 @@ async function handler(req, res) {
       });
       return json(res, { ok: true, url: blob.url });
     }
-    // Image files live in Blob and are immutable. Deletion is intentionally a
-    // no-op here because a saved history record may still reference the URL.
+    // Blob files are immutable. Keep them because saved history records may
+    // still reference the URL after the current draft removes the image.
     if (req.method === 'DELETE') return json(res, { ok: true });
   }
 
   if (req.method === 'POST' && parts.length === 1 && parts[0] === 'draft') {
     const document = await readJson(req);
-    await sql`INSERT INTO dnr_drafts (id, document, updated_at)
-      VALUES (1, ${JSON.stringify(document)}::jsonb, NOW())
-      ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document, updated_at = NOW()`;
+    await db.execute({
+      sql: `INSERT INTO dnr_drafts (id, document, updated_at)
+        VALUES (1, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = CURRENT_TIMESTAMP`,
+      args: [JSON.stringify(document)]
+    });
     return json(res, { ok: true });
   }
 
   if (req.method === 'GET' && parts.length === 1 && parts[0] === 'history') {
-    const rows = await sql`SELECT id, name, created_at, document FROM dnr_history ORDER BY id DESC`;
-    return json(res, { records: rows.map(row => ({
-      id: String(row.id), name: row.name, created_at: row.created_at,
-      screenshot_count: screenshotCount(row.document)
-    })) });
+    const result = await db.execute('SELECT id, name, created_at, document FROM dnr_history ORDER BY id DESC');
+    return json(res, { records: result.rows.map(row => {
+      const document = parseDocument(row.document);
+      return {
+        id: String(row.id),
+        name: row.name,
+        created_at: row.created_at,
+        screenshot_count: screenshotCount(document)
+      };
+    }) });
   }
 
   if (req.method === 'POST' && parts.length === 1 && parts[0] === 'history') {
@@ -135,23 +155,29 @@ async function handler(req, res) {
     const name = String(payload.name || '').trim();
     if (!name) return error(res, 'History record name is required');
     if (!payload.document || typeof payload.document !== 'object') return error(res, 'History record document is required');
-    const rows = await sql`INSERT INTO dnr_history (name, document) VALUES (${name}, ${JSON.stringify(payload.document)}::jsonb) RETURNING id`;
-    return json(res, { ok: true, id: String(rows[0].id) });
+    const result = await db.execute({
+      sql: 'INSERT INTO dnr_history (name, document) VALUES (?, ?) RETURNING id',
+      args: [name, JSON.stringify(payload.document)]
+    });
+    return json(res, { ok: true, id: String(result.rows[0].id) });
   }
 
   if (parts[0] === 'history' && /^\d+$/.test(parts[1] || '')) {
     const id = Number(parts[1]);
     if (req.method === 'DELETE' && parts.length === 2) {
-      await sql`DELETE FROM dnr_history WHERE id = ${id}`;
+      await db.execute({ sql: 'DELETE FROM dnr_history WHERE id = ?', args: [id] });
       return json(res, { ok: true });
     }
     if (req.method === 'POST' && parts[2] === 'load') {
-      const rows = await sql`SELECT document FROM dnr_history WHERE id = ${id}`;
-      if (!rows[0]) return error(res, 'History record not found', 404);
-      const document = rows[0].document;
-      await sql`INSERT INTO dnr_drafts (id, document, updated_at)
-        VALUES (1, ${JSON.stringify(document)}::jsonb, NOW())
-        ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document, updated_at = NOW()`;
+      const result = await db.execute({ sql: 'SELECT document FROM dnr_history WHERE id = ?', args: [id] });
+      if (!result.rows[0]) return error(res, 'History record not found', 404);
+      const document = parseDocument(result.rows[0].document);
+      await db.execute({
+        sql: `INSERT INTO dnr_drafts (id, document, updated_at)
+          VALUES (1, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = CURRENT_TIMESTAMP`,
+        args: [JSON.stringify(document)]
+      });
       return json(res, { draft: document });
     }
   }

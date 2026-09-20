@@ -12,13 +12,15 @@ Use **Save Record** to archive the current report, then **History** to load or d
 
 ## Vercel deployment
 
-Vercel uses the serverless API in `api/[...path].js`, not `server.js`. Create/connect these two Vercel resources:
+Vercel uses the serverless API in `api/[...path].js`, not `server.js`. Create/connect these two resources:
 
-1. A Neon Postgres integration, with `DATABASE_URL` available to the project.
+1. A Turso database, with `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` available to the project.
 2. A Vercel Blob store, with `BLOB_READ_WRITE_TOKEN` available to the project.
 
-Then redeploy. Report metadata and history are stored in Neon; screenshot files are stored in Vercel Blob. The first request creates the required Postgres tables automatically.
+Then redeploy. Report metadata and history are stored in Turso; screenshot files are stored in Vercel Blob. The first request creates the required Turso tables automatically.
 
 The existing local `dnr.sqlite3` file is not uploaded or migrated automatically; it remains the local-development database. Add the variables shown in [`.env.example`](C:\Users\ProfieJack\Desktop\DNR Maker\.env.example) in Vercel's Project Settings → Environment Variables.
+
+To reset only this app's Turso data, set the Turso variables locally and run `RESET_DNR_DATABASE=1 npm run reset:turso`. The reset script intentionally requires the explicit confirmation variable and does not delete unrelated Turso tables.
 
 `index.html` can still be opened directly, but it will use the browser's fallback storage. For the SQLite-backed version, always start `server.js` first.
