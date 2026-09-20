@@ -111,13 +111,53 @@ function historyIdFromPath(pathname) {
 async function handle(req, res) {
   const requestUrl = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
   const pathname = requestUrl.pathname;
+  const queryShotId = requestUrl.searchParams.get('shotId');
+  const historyAction = requestUrl.searchParams.get('action');
+  const historyQueryId = requestUrl.searchParams.get('id');
 
   if (req.method === 'GET' && pathname === '/api/draft') {
     return sendJson(res, { draft: clientDraft() });
   }
 
-  if (req.method === 'GET' && pathname === '/api/history') {
+  if (req.method === 'GET' && pathname === '/api/history' && !historyAction) {
     return sendJson(res, { records: historyRecords() });
+  }
+
+  if (pathname === '/api/history' && /^\d+$/.test(historyQueryId || '')) {
+    const recordId = Number(historyQueryId);
+    if (req.method === 'DELETE' && historyAction === 'delete') {
+      db.exec('BEGIN');
+      try {
+        db.prepare('DELETE FROM history_images WHERE record_id = ?').run(recordId);
+        db.prepare('DELETE FROM history WHERE id = ?').run(recordId);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      return sendJson(res, { ok: true });
+    }
+    if (req.method === 'POST' && historyAction === 'load') {
+      const row = db.prepare('SELECT document FROM history WHERE id = ?').get(recordId);
+      if (!row) return sendError(res, 'History record not found', 404);
+      const document = JSON.parse(row.document);
+      const images = db.prepare('SELECT shot_id, mime_type, data FROM history_images WHERE record_id = ?').all(recordId);
+      db.exec('BEGIN');
+      try {
+        db.exec('DELETE FROM screenshots');
+        const insertImage = db.prepare('INSERT INTO screenshots (shot_id, mime_type, data, updated_at) VALUES (?, ?, ?, ?)');
+        for (const image of images) insertImage.run(image.shot_id, image.mime_type, image.data, now());
+        db.prepare(`
+          INSERT INTO drafts (id, document, updated_at) VALUES (1, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET document=excluded.document, updated_at=excluded.updated_at
+        `).run(JSON.stringify(document), now());
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      return sendJson(res, { draft: documentForClient(db) });
+    }
   }
 
   if (pathname.startsWith('/api/history/')) {
@@ -160,8 +200,10 @@ async function handle(req, res) {
     }
   }
 
-  if (pathname.startsWith('/api/images/')) {
-    const shotId = decodeURIComponent(pathname.slice('/api/images/'.length));
+  if (pathname.startsWith('/api/images/') || (pathname === '/api/images' && queryShotId)) {
+    const shotId = pathname.startsWith('/api/images/')
+      ? decodeURIComponent(pathname.slice('/api/images/'.length))
+      : queryShotId;
     if (req.method === 'GET') {
       const row = db.prepare('SELECT mime_type, data FROM screenshots WHERE shot_id = ?').get(shotId);
       if (!row) return sendError(res, 'Screenshot not found', 404);

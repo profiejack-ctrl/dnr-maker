@@ -96,14 +96,19 @@ function screenshotCount(document) {
 async function handler(req, res) {
   const db = database();
   await ensureSchema(db);
+  const requestUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const parts = pathParts(req);
+  const queryShotId = requestUrl.searchParams.get('shotId');
+  const historyAction = requestUrl.searchParams.get('action');
+  const historyQueryId = requestUrl.searchParams.get('id');
 
   if (req.method === 'GET' && parts.length === 1 && parts[0] === 'draft') {
     const result = await db.execute('SELECT document FROM dnr_drafts WHERE id = 1');
     return json(res, { draft: parseDocument(result.rows[0]?.document) });
   }
 
-  if (parts[0] === 'images' && parts[1]) {
+  if (parts[0] === 'images' && (parts[1] || queryShotId)) {
+    const shotId = parts[1] || queryShotId;
     if (req.method === 'POST') {
       const mimeType = String(req.headers['content-type'] || '').split(';', 1)[0];
       if (!mimeType.startsWith('image/')) return error(res, 'Only image uploads are supported');
@@ -114,7 +119,7 @@ async function handler(req, res) {
         return error(res, uploadError.message, 413);
       }
       if (!data.length) return error(res, 'Image is empty');
-      const blob = await put(`dnr/${Date.now()}-${parts[1]}`, data, {
+      const blob = await put(`dnr/${Date.now()}-${shotId}`, data, {
         access: 'public',
         addRandomSuffix: true,
         contentType: mimeType
@@ -137,7 +142,7 @@ async function handler(req, res) {
     return json(res, { ok: true });
   }
 
-  if (req.method === 'GET' && parts.length === 1 && parts[0] === 'history') {
+  if (req.method === 'GET' && parts.length === 1 && parts[0] === 'history' && !historyAction) {
     const result = await db.execute('SELECT id, name, created_at, document FROM dnr_history ORDER BY id DESC');
     return json(res, { records: result.rows.map(row => {
       const document = parseDocument(row.document);
@@ -160,6 +165,26 @@ async function handler(req, res) {
       args: [name, JSON.stringify(payload.document)]
     });
     return json(res, { ok: true, id: String(result.rows[0].id) });
+  }
+
+  if (parts.length === 1 && parts[0] === 'history' && /^\d+$/.test(historyQueryId || '')) {
+    const id = Number(historyQueryId);
+    if (req.method === 'DELETE' && historyAction === 'delete') {
+      await db.execute({ sql: 'DELETE FROM dnr_history WHERE id = ?', args: [id] });
+      return json(res, { ok: true });
+    }
+    if (req.method === 'POST' && historyAction === 'load') {
+      const result = await db.execute({ sql: 'SELECT document FROM dnr_history WHERE id = ?', args: [id] });
+      if (!result.rows[0]) return error(res, 'History record not found', 404);
+      const document = parseDocument(result.rows[0].document);
+      await db.execute({
+        sql: `INSERT INTO dnr_drafts (id, document, updated_at)
+          VALUES (1, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = CURRENT_TIMESTAMP`,
+        args: [JSON.stringify(document)]
+      });
+      return json(res, { draft: document });
+    }
   }
 
   if (parts[0] === 'history' && /^\d+$/.test(parts[1] || '')) {
