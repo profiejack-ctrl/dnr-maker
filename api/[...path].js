@@ -155,7 +155,7 @@ async function handler(req, res) {
     }) });
   }
 
-  if (req.method === 'POST' && parts.length === 1 && parts[0] === 'history') {
+  if (req.method === 'POST' && parts.length === 1 && parts[0] === 'history' && !historyAction) {
     const payload = await readJson(req);
     const name = String(payload.name || '').trim();
     if (!name) return error(res, 'History record name is required');
