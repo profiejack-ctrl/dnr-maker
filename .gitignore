@@ -1,0 +1,6 @@
+node_modules/
+.env
+.vercel/
+dnr.sqlite3
+dnr.sqlite3-shm
+dnr.sqlite3-wal
