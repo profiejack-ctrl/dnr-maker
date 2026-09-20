@@ -3,7 +3,7 @@
 For local use, run the app with Node.js 22.5 or newer:
 
 ```powershell
-node server.js
+node local-server.cjs
 ```
 
 Open <http://127.0.0.1:8000/>. Local screenshots are stored in SQLite for offline development.
@@ -12,7 +12,7 @@ Use **Save Record** to archive the current report, then **History** to load or d
 
 ## Vercel deployment
 
-Vercel uses the serverless API in `api/[...path].js`, not `server.js`. Create/connect these two resources:
+Vercel uses the serverless API in `api/[...path].js`, not `local-server.cjs`. Create/connect these two resources:
 
 1. A Turso database, with `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` available to the project.
 2. A Vercel Blob store, with `BLOB_READ_WRITE_TOKEN` available to the project.
@@ -23,4 +23,4 @@ The existing local `dnr.sqlite3` file is not uploaded or migrated automatically;
 
 To reset only this app's Turso data, set the Turso variables locally and run `RESET_DNR_DATABASE=1 npm run reset:turso`. The reset script intentionally requires the explicit confirmation variable and does not delete unrelated Turso tables.
 
-`index.html` can still be opened directly, but it will use the browser's fallback storage. For the SQLite-backed version, always start `server.js` first.
+`index.html` can still be opened directly, but it will use the browser's fallback storage. For the SQLite-backed local version, always start `local-server.cjs` first.
