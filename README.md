@@ -17,7 +17,7 @@ Vercel uses the serverless API in `api/[...path].js`, not `local-server.cjs`. Cr
 1. A Turso database, with `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` available to the project.
 2. A Vercel Blob store, with `BLOB_READ_WRITE_TOKEN` available to the project.
 
-Then redeploy. Report metadata and history are stored in Turso; screenshot files are stored in Vercel Blob. The first request creates the required Turso tables automatically.
+Then redeploy. Report metadata and history are stored in Turso; screenshot files are converted to WebP in the browser before being stored in Vercel Blob. The first request creates the required Turso tables automatically.
 
 The existing local `dnr.sqlite3` file is not uploaded or migrated automatically; it remains the local-development database. Add the variables shown in [`.env.example`](C:\Users\ProfieJack\Desktop\DNR Maker\.env.example) in Vercel's Project Settings → Environment Variables.
 
