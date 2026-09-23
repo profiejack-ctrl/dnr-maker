@@ -1,5 +1,5 @@
 const { createClient } = require('@libsql/client');
-const { put } = require('@vercel/blob');
+const { list, put } = require('@vercel/blob');
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 let client;
@@ -93,6 +93,32 @@ function screenshotCount(document) {
   return (document.sections || []).reduce((total, section) => total + (section.shots || []).filter(shot => shot.image).length, 0);
 }
 
+async function hydrateLegacyImages(document) {
+  const shots = [];
+  for (const section of document?.sections || []) {
+    for (const shot of section.shots || []) {
+      if (shot.image === true) shots.push(shot);
+    }
+  }
+  if (!shots.length) return document;
+
+  const blobs = [];
+  let cursor;
+  do {
+    const page = await list({ prefix: 'dnr/', limit: 1000, ...(cursor ? { cursor } : {}) });
+    blobs.push(...page.blobs);
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor);
+
+  for (const shot of shots) {
+    const suffix = `-${shot.id}`;
+    const matches = blobs.filter(blob => blob.pathname.includes(suffix));
+    matches.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+    shot.image = matches[0]?.url || '';
+  }
+  return document;
+}
+
 async function handler(req, res) {
   const db = database();
   await ensureSchema(db);
@@ -104,7 +130,8 @@ async function handler(req, res) {
 
   if (req.method === 'GET' && parts.length === 1 && parts[0] === 'draft') {
     const result = await db.execute('SELECT document FROM dnr_drafts WHERE id = 1');
-    return json(res, { draft: parseDocument(result.rows[0]?.document) });
+    const document = await hydrateLegacyImages(parseDocument(result.rows[0]?.document));
+    return json(res, { draft: document });
   }
 
   if (parts[0] === 'images' && (parts[1] || queryShotId)) {
@@ -176,7 +203,7 @@ async function handler(req, res) {
     if (req.method === 'POST' && historyAction === 'load') {
       const result = await db.execute({ sql: 'SELECT document FROM dnr_history WHERE id = ?', args: [id] });
       if (!result.rows[0]) return error(res, 'History record not found', 404);
-      const document = parseDocument(result.rows[0].document);
+      const document = await hydrateLegacyImages(parseDocument(result.rows[0].document));
       await db.execute({
         sql: `INSERT INTO dnr_drafts (id, document, updated_at)
           VALUES (1, ?, CURRENT_TIMESTAMP)
